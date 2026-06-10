@@ -4,7 +4,12 @@ from dotenv import load_dotenv
 from db import (
     goals_collection,
     progress_collection,
-    plans_collection
+    plans_collection,
+    recommendations_collection,
+    expenses_collection,
+    agent_tasks_collection,
+    agent_logs_collection,
+    health_scores_collection
 )
 import os
 import google.generativeai as genai
@@ -23,14 +28,20 @@ class FinancialGoal(BaseModel):
     monthly_investment: int
     goal: str
 
+
 class ProgressUpdate(BaseModel):
     name: str
     current_savings: int
 
+
+class AgentRequest(BaseModel):
+    task: str
+
+
 @app.get("/")
 def root():
     return {
-        "status": "WealthPilotAI Running"
+        "status": "WealthPilotAI Agent Running"
     }
 
 
@@ -45,23 +56,14 @@ def create_goal(data: FinancialGoal):
     }
 
 
-@app.get("/goal/{name}")
-def get_goal(name: str):
+@app.post("/update-progress")
+def update_progress(data: ProgressUpdate):
 
-    goal = goals_collection.find_one(
-        {"name": name},
-        {"_id": 0}
-    )
-
-    if not goal:
-        return {
-            "status": "error",
-            "message": "Goal not found"
-        }
+    progress_collection.insert_one(data.model_dump())
 
     return {
         "status": "success",
-        "goal": goal
+        "message": "Progress updated"
     }
 
 
@@ -74,38 +76,23 @@ def generate_plan(name: str):
     )
 
     if not goal:
-        return {
-            "status": "error",
-            "message": "Goal not found"
-        }
+        return {"error": "Goal not found"}
 
     model = genai.GenerativeModel("gemini-3.5-flash")
 
     prompt = f"""
-    You are WealthPilotAI, an expert financial planning agent.
+    You are WealthPilotAI.
 
-    User Details:
-    Name: {goal['name']}
-    Age: {goal['age']}
-    Monthly Income: ₹{goal['monthly_income']}
-    Monthly Investment: ₹{goal['monthly_investment']}
-    Goal: {goal['goal']}
+    User Goal:
+    {goal}
 
-    Analyze the user's financial goal and provide:
-
-    1. Success Probability
-    2. Recommended Investment Allocation
-    3. Key Risks
-    4. Monthly Action Plan
-    5. Specific Steps the user should take immediately
-
-    Keep the response practical and actionable.
+    Generate a detailed financial roadmap.
     """
 
     response = model.generate_content(prompt)
 
     plans_collection.insert_one({
-        "name": goal["name"],
+        "name": name,
         "plan": response.text
     })
 
@@ -114,21 +101,153 @@ def generate_plan(name: str):
         "plan": response.text
     }
 
-@app.post("/update-progress")
-def update_progress(data: ProgressUpdate):
 
-    progress_collection.insert_one(
-        data.model_dump()
+@app.post("/agent/{name}")
+def run_agent(name: str, data: AgentRequest):
+
+    goal = goals_collection.find_one(
+        {"name": name},
+        {"_id": 0}
     )
+
+    if not goal:
+        return {
+            "error": "Goal not found"
+        }
+
+    latest_progress = progress_collection.find_one(
+        {"name": name},
+        sort=[("_id", -1)]
+    )
+
+    latest_plan = plans_collection.find_one(
+        {"name": name},
+        sort=[("_id", -1)]
+    )
+
+    previous_recommendations = list(
+        recommendations_collection.find(
+            {"name": name},
+            {"_id": 0}
+        )
+    )
+
+    model = genai.GenerativeModel("gemini-3.5-flash")
+
+    prompt = f"""
+    You are WealthPilotAI.
+
+    Act as an autonomous financial planning agent.
+
+    Goal:
+    {goal}
+
+    Latest Progress:
+    {latest_progress}
+
+    Latest Plan:
+    {latest_plan}
+
+    Previous Recommendations:
+    {previous_recommendations}
+
+    User Task:
+    {data.task}
+
+    Perform these steps:
+
+    1. Analyze the user's goal
+    2. Analyze current financial progress
+    3. Review previous recommendations
+    4. Identify risks
+    5. Decide the next action
+    6. Assign a priority
+
+    Respond EXACTLY in this format:
+
+    Recommendation:
+    <recommendation>
+
+    Action:
+    <single next action>
+
+    Priority:
+    <Low/Medium/High>
+    """
+
+    response = model.generate_content(prompt)
+
+    recommendation_text = response.text
+
+    # Save recommendation memory
+    recommendations_collection.insert_one({
+        "name": name,
+        "task": data.task,
+        "recommendation": recommendation_text
+    })
+
+    # Save agent task
+    agent_tasks_collection.insert_one({
+        "name": name,
+        "source_task": data.task,
+        "generated_action": recommendation_text,
+        "status": "pending"
+    })
+
+    # Save agent log
+    agent_logs_collection.insert_one({
+        "name": name,
+        "event": "agent_execution",
+        "task": data.task
+    })
 
     return {
         "status": "success",
-        "message": "Progress updated"
+        "recommendation": recommendation_text
+    }
+
+@app.get("/history/{name}")
+def get_history(name: str):
+
+    goals = list(
+        goals_collection.find(
+            {"name": name},
+            {"_id": 0}
+        )
+    )
+
+    plans = list(
+        plans_collection.find(
+            {"name": name},
+            {"_id": 0}
+        )
+    )
+
+    progress = list(
+        progress_collection.find(
+            {"name": name},
+            {"_id": 0}
+        )
+    )
+
+    recommendations = list(
+        recommendations_collection.find(
+            {"name": name},
+            {"_id": 0}
+        )
+    )
+
+    return {
+        "goals": goals,
+        "plans": plans,
+        "progress": progress,
+        "recommendations": recommendations
     }
 
 
-@app.get("/check-status/{name}")
-def check_status(name: str):
+
+@app.get("/health-score/{name}")
+def health_score(name: str):
 
     goal = goals_collection.find_one(
         {"name": name},
@@ -136,35 +255,29 @@ def check_status(name: str):
     )
 
     progress = progress_collection.find_one(
-    {"name": name},
-    sort=[("_id", -1)]
-)
-    if not goal:
-        return {"error": "Goal not found"}
+        {"name": name},
+        sort=[("_id", -1)]
+    )
 
-    if not progress:
-        return {"error": "No progress found"}
+    if not goal or not progress:
+        return {
+            "error": "Data missing"
+        }
 
-    model = genai.GenerativeModel("gemini-3.5-flash")
+    score = min(
+        int(
+            (progress["current_savings"] /
+             max(goal["monthly_investment"], 1))
+        ),
+        100
+    )
 
-    prompt = f"""
-    User Goal:
-    {goal}
-
-    Current Progress:
-    {progress}
-
-    Analyze:
-
-    1. Is the user on track?
-    2. What risks exist?
-    3. What actions should be taken?
-    4. How much should the user invest monthly now?
-    """
-
-    response = model.generate_content(prompt)
+    health_scores_collection.insert_one({
+        "name": name,
+        "score": score
+    })
 
     return {
-        "status": "success",
-        "analysis": response.text
+        "name": name,
+        "financial_health_score": score
     }
