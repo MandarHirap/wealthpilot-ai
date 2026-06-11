@@ -33,6 +33,11 @@ class ProgressUpdate(BaseModel):
     name: str
     current_savings: int
 
+class Expense(BaseModel):
+    name: str
+    category: str
+    amount: int
+    description: str
 
 class AgentRequest(BaseModel):
     task: str
@@ -64,6 +69,19 @@ def update_progress(data: ProgressUpdate):
     return {
         "status": "success",
         "message": "Progress updated"
+    }
+
+
+@app.post("/add-expense")
+def add_expense(data: Expense):
+
+    expenses_collection.insert_one(
+        data.model_dump()
+    )
+
+    return {
+        "status": "success",
+        "message": "Expense added"
     }
 
 
@@ -102,6 +120,29 @@ def generate_plan(name: str):
     }
 
 
+@app.get("/expense-summary/{name}")
+def expense_summary(name: str):
+
+    expenses = list(
+        expenses_collection.find(
+            {"name": name},
+            {"_id": 0}
+        )
+    )
+
+    total = sum(
+        item["amount"]
+        for item in expenses
+    )
+
+    return {
+        "name": name,
+        "total_spent": total,
+        "expenses": expenses
+    }
+
+
+
 @app.post("/agent/{name}")
 def run_agent(name: str, data: AgentRequest):
 
@@ -132,6 +173,13 @@ def run_agent(name: str, data: AgentRequest):
         )
     )
 
+    recent_expenses = list(
+    expenses_collection.find(
+        {"name": name},
+        {"_id": 0}
+    )
+)
+
     model = genai.GenerativeModel("gemini-3.5-flash")
 
     prompt = f"""
@@ -148,6 +196,17 @@ def run_agent(name: str, data: AgentRequest):
     Latest Plan:
     {latest_plan}
 
+    Recent Expenses:
+    {recent_expenses}
+
+    Financial Context:
+
+    Monthly Income:
+    {goal['monthly_income']}
+
+    Target Monthly Investment:
+    {goal['monthly_investment']}
+
     Previous Recommendations:
     {previous_recommendations}
 
@@ -158,10 +217,13 @@ def run_agent(name: str, data: AgentRequest):
 
     1. Analyze the user's goal
     2. Analyze current financial progress
-    3. Review previous recommendations
-    4. Identify risks
-    5. Decide the next action
-    6. Assign a priority
+    3. Analyze recent expenses
+    4. Detect overspending patterns
+    5. Review previous recommendations
+    6. Identify risks
+    7. Decide the next action
+    8. Estimate potential monthly savings
+    9. Assign a priority
 
     Respond EXACTLY in this format:
 
@@ -170,6 +232,9 @@ def run_agent(name: str, data: AgentRequest):
 
     Action:
     <single next action>
+
+    Monthly Savings Opportunity:
+    <amount in INR>
 
     Priority:
     <Low/Medium/High>
@@ -264,13 +329,37 @@ def health_score(name: str):
             "error": "Data missing"
         }
 
-    score = min(
+    total_expenses = sum(
+    expense["amount"]
+    for expense in expenses_collection.find(
+        {"name": name},
+        {"_id": 0}
+        )
+    )
+
+    investment_ratio = (
+        progress["current_savings"] /
+        max(goal["monthly_investment"], 1)
+    )
+
+    expense_ratio = (
+        total_expenses /
+        max(goal["monthly_income"], 1)
+    )
+
+    score = max(
+    0,
+    min(
         int(
-            (progress["current_savings"] /
-             max(goal["monthly_investment"], 1))
+            (
+                investment_ratio * 70
+                +
+                (1 - min(expense_ratio, 1)) * 30
+            )
         ),
         100
     )
+)
 
     health_scores_collection.insert_one({
         "name": name,
@@ -280,4 +369,38 @@ def health_score(name: str):
     return {
         "name": name,
         "financial_health_score": score
+    }
+
+@app.get("/tasks/{name}")
+def get_tasks(name: str):
+
+    tasks = list(
+        agent_tasks_collection.find(
+            {"name": name},
+            {"_id": 0}
+        )
+    )
+
+    return {
+        "tasks": tasks
+    }
+
+
+@app.put("/task-complete/{name}")
+def complete_task(name: str):
+
+    agent_tasks_collection.update_one(
+        {
+            "name": name,
+            "status": "pending"
+        },
+        {
+            "$set": {
+                "status": "completed"
+            }
+        }
+    )
+
+    return {
+        "status": "success"
     }
